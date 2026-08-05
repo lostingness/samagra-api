@@ -1,11 +1,10 @@
-from flask import Flask, request, jsonify
-import requests
+from http.server import BaseHTTPRequestHandler
 import json
+import urllib.parse
+import requests
 import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-app = Flask(__name__)
 
 BASE = "https://samagra.gov.in/Services"
 UID_URL = f"{BASE}/CommonWebApi.svc/GetDetailsBySamagra"
@@ -78,40 +77,81 @@ def uid_to_details(uid):
         ] if len(records) > 1 else [],
     }
 
-def get_param(key):
-    val = request.args.get(key, "").strip()
-    if val:
-        return val
-    body = request.get_json(silent=True) or {}
-    val = str(body.get(key, "")).strip()
-    if val:
-        return val
-    return request.form.get(key, "").strip() or ""
+def json_response(handler, data, status=200):
+    body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+    handler.send_response(status)
+    handler.send_header("Content-Type", "application/json; charset=utf-8")
+    handler.send_header("Access-Control-Allow-Origin", "*")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    handler.wfile.write(body)
 
-@app.route("/api/samagra", methods=["GET", "POST"])
-def samagra():
-    mobile = get_param("mobile")
-    uid = get_param("uid")
+def parse_query(path):
+    parsed = urllib.parse.urlparse(path)
+    params = urllib.parse.parse_qs(parsed.query)
+    return {k: v[0] for k, v in params.items()}, parsed.path
 
-    if uid:
-        if not uid.isdigit():
-            return jsonify({"success": False, "error": "UID must be numeric."}), 400
-        info = uid_to_details(uid)
-        if not info:
-            return jsonify({"success": False, "error": f"No data for UID {uid}."}), 404
-        return jsonify({"success": True, "query_type": "uid", "query_value": uid, "total_members": 1, "members": [info]})
+def parse_body(handler):
+    try:
+        length = int(handler.headers.get("Content-Length", 0))
+        if length > 0:
+            raw = handler.rfile.read(length)
+            return json.loads(raw)
+    except:
+        pass
+    return {}
 
-    if mobile:
-        if not mobile.isdigit() or len(mobile) != 10:
-            return jsonify({"success": False, "error": "Mobile must be 10 digits."}), 400
-        uids = mobile_to_uids(mobile)
-        if not uids:
-            return jsonify({"success": False, "error": f"No Samagra ID found for {mobile}."}), 404
-        members = [info for u in uids if (info := uid_to_details(u))]
-        return jsonify({"success": True, "query_type": "mobile", "query_value": mobile, "total_members": len(members), "member_ids": uids, "members": members})
+class handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.handle()
+    def do_POST(self):
+        self.handle()
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
 
-    return jsonify({"success": False, "error": "Pass ?mobile= or ?uid=", "usage": {"GET": "/api/samagra?mobile=9171175657", "POST": '{"mobile":"9171175657"}'}}), 400
+    def handle(self):
+        params, path = parse_query(self.path)
+        body = parse_body(self)
 
-@app.route("/", methods=["GET"])
-def health():
-    return jsonify({"service": "Samagra MP Intel API", "status": "online", "endpoints": {"mobile": "/api/samagra?mobile=9171175657", "uid": "/api/samagra?uid=125142607"}})
+        mobile = params.get("mobile", "") or body.get("mobile", "")
+        uid = params.get("uid", "") or body.get("uid", "")
+
+        # Health check
+        if path in ("/", "/health", ""):
+            return json_response(self, {
+                "service": "Samagra MP Intel API",
+                "endpoints": {
+                    "mobile": "/api/samagra?mobile=9171175657",
+                    "uid": "/api/samagra?uid=125142607"
+                }
+            })
+
+        # Samagra lookup
+        if "/api/samagra" in path:
+            if uid:
+                if not uid.isdigit():
+                    return json_response(self, {"success": False, "error": "UID must be numeric."}, 400)
+                info = uid_to_details(uid)
+                if not info:
+                    return json_response(self, {"success": False, "error": f"No data for UID {uid}."}, 404)
+                return json_response(self, {"success": True, "query_type": "uid", "query_value": uid, "total_members": 1, "members": [info]})
+
+            if mobile:
+                if not mobile.isdigit() or len(mobile) != 10:
+                    return json_response(self, {"success": False, "error": "Mobile must be 10 digits."}, 400)
+                uids = mobile_to_uids(mobile)
+                if not uids:
+                    return json_response(self, {"success": False, "error": f"No Samagra ID found for {mobile}."}, 404)
+                members = [info for u in uids if (info := uid_to_details(u))]
+                return json_response(self, {"success": True, "query_type": "mobile", "query_value": mobile, "total_members": len(members), "member_ids": uids, "members": members})
+
+            return json_response(self, {"success": False, "error": "Pass ?mobile= or ?uid="}, 400)
+
+        return json_response(self, {"success": False, "error": "Not found"}, 404)
+
+    def log_message(self, format, *args):
+        pass
