@@ -1,0 +1,7 @@
+{
+  "vercel.json"
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "/api/index.py" },
+    { "source": "/(.*)", "destination": "/api/index.py" }
+  ]
+}
